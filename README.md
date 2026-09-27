@@ -99,13 +99,13 @@ python main.py
 | `OKX_SECRET_KEY` | OKX Secret |
 | `OKX_PASSPHRASE` | 创建 API 时设置的口令 |
 | `OKX_FLAG` | `1` 模拟盘（默认），`0` 实盘 |
-| `OKX_AI_BUILDER_CODE` | AI Builder Code。交易请求写入 `tag` |
+| `OKX_AI_BUILDER_CODE` | AI Builder Code。启动可留空；确认下单和停止网格前必须填上，并写入 `tag` |
 | `OKX_BASE_URL` | 默认 `https://www.okx.com` |
 | `DEFAULT_KLINE_BAR` | 默认 K 线周期，`15m` |
 | `MONITOR_INTERVAL_SEC` | 订单簿哨兵轮询间隔，默认 8 秒 |
 | `LOG_LEVEL` | 日志级别，默认 `INFO` |
 
-启动时若上述必填项（Groq、Telegram、OKX 三件套、Builder Code）有空值，`python main.py` 会直接退出并指出缺哪一项。
+启动时若 Groq、Telegram 或 OKX 三件套为空，`python main.py` 会退出并指出缺哪一项。`OKX_AI_BUILDER_CODE` 可以先留空：Builder 申请还在审核时机器人仍能启动。`/status` 和 `/help` 会写明「未配置」。确认下单和停止网格在填上码并重启之前会失败，而且不会发出交易请求。
 
 ## AI Builder Code 和 GitHub 地址
 
@@ -117,7 +117,7 @@ OKX AI Builder 计划用项目的公开仓库标明这套代理是谁的实现�
 
 成交归因用的是另一份凭证：AI Builder Code。把它放到 `OKX_AI_BUILDER_CODE`。本仓库的 OKX 客户端在每条会改变订单或网格的请求里强制写入字段 `tag`（OpenAPI 不接受名为 `aiBuilderCode` 的字段）。调用方如果自己塞了别的 `tag`，也会被覆盖成这份码。
 
-未配置时，下单和停止网格都会在发出前失败。机器人会用中文提示你设置 `OKX_AI_BUILDER_CODE`，而不是静默丢单。只读的「我的网格」不写 `tag`。
+码还没下来时可以先启动。未配置时，确认卡上的一键下单和「停止网格」都会用中文说明失败原因，请求不会发到 OKX。只读的「我的网格」不写 `tag`。拿到码后写入 `OKX_AI_BUILDER_CODE` 并重启。
 
 集成说明：<https://www.okx.com/zh-hans/help/ai-builder-program-integration-guide>
 

@@ -74,8 +74,8 @@ HELP_TEXT = (
     "❓ 帮助：本说明。\n\n"
     "铁律\n"
     "· Groq 只做意图理解和中文说明，不计算价格、网格或下单参数。\n"
-    "· 每次下单和停止都会把 AI Builder Code 写入 OKX 的 tag。没配置 OKX_AI_BUILDER_CODE 时，交易请求会被拒绝。\n"
-    "· 行情、ATR、VWAP、CVD、OI 急刹车和网格数学都在 Python 里完成。\n\n"
+    "· 行情、ATR、VWAP、CVD、OI 急刹车和网格数学都在 Python 里完成。\n"
+    "{builder_status}\n\n"
     "命令\n"
     "/start  /menu  打开主菜单\n"
     "/grids  /positions  我的网格\n"
@@ -111,15 +111,37 @@ def is_menu_text(text: str) -> bool:
     return text.strip() in MENU_ACTIONS
 
 
+MISSING_BUILDER_CODE_TEXT = (
+    "AI Builder Code：未配置。\n"
+    "确认下单和停止网格会失败，直到在 pulsegrid/.env 设置 OKX_AI_BUILDER_CODE 并重启机器人。\n"
+    "在此之前不会向 OKX 发送交易请求。"
+)
+
+
+def builder_code_missing(settings: object) -> bool:
+    """空字符串表示未配置。没有该字段的测试替身不拦截，避免误伤旧用例。"""
+    if not hasattr(settings, "okx_ai_builder_code"):
+        return False
+    return not str(getattr(settings, "okx_ai_builder_code") or "").strip()
+
+
+def format_builder_code_status(code: object) -> str:
+    text = str(code or "").strip()
+    if not text:
+        return MISSING_BUILDER_CODE_TEXT
+    masked = (text[:2] + "…" + text[-2:]) if len(text) > 4 else "已配置"
+    return f"AI Builder Code：{masked}\n确认下单和停止网格会把该码写入 OKX 的 tag。"
+
+
+def render_help(code: object) -> str:
+    return HELP_TEXT.format(builder_status=format_builder_code_status(code))
+
+
 def format_okx_trade_error(exc: OkxClientError, *, action: str = "请求") -> str:
-    """把交易路径的异常收成中文。缺 Builder Code 时明确指出要设置的变量。"""
+    """把交易路径的异常收成中文。缺 Builder Code 时说明确认下单和停止网格都会失败。"""
     text = str(exc)
-    if "OKX_AI_BUILDER_CODE" in text:
-        return (
-            "未配置 AI Builder Code，交易已被拒绝。\n"
-            "请在 pulsegrid/.env 设置 OKX_AI_BUILDER_CODE 后重启机器人。\n"
-            "下单和停止网格都会把该码写入 OKX 的 tag 字段；未配置时不会发送交易请求。"
-        )
+    if "OKX_AI_BUILDER_CODE" in text or "未配置" in text and "tag" in text:
+        return MISSING_BUILDER_CODE_TEXT
     return f"OKX {action}失败：{text}"
 
 
@@ -269,7 +291,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None:
         return
-    await _reply_menu(message, HELP_TEXT)
+    runtime = _runtime(context)
+    await _reply_menu(message, render_help(runtime.settings.okx_ai_builder_code))
 
 
 async def cmd_new_strategy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -288,8 +311,6 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     async with runtime.lock:
         watch_count = len(runtime.watches)
         plan_count = len(runtime.plans)
-    code = settings.okx_ai_builder_code
-    masked = (code[:2] + "…" + code[-2:]) if len(code) > 4 else ("已配置" if code else "未配置")
     await _reply_menu(
         message,
         f"环境：{'模拟盘' if settings.is_demo else '实盘'}\n"
@@ -297,7 +318,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"K 线周期：{settings.default_kline_bar}\n"
         f"监控中的交易对：{watch_count}\n"
         f"待确认策略：{plan_count}\n"
-        f"AI Builder Code：{masked}\n"
+        f"{format_builder_code_status(settings.okx_ai_builder_code)}\n"
         "订单簿监控与下单在同一个事件循环里并发执行。",
     )
 
@@ -517,6 +538,10 @@ async def on_stop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     message = query.message
     if message is None:
         await _reset_submitting(runtime, algo_id)
+        return
+    if builder_code_missing(runtime.settings):
+        await _reset_submitting(runtime, algo_id)
+        await _reply_menu(message, MISSING_BUILDER_CODE_TEXT)
         return
     try:
         await runtime.algo.stop_spot_grid(algo_id=algo_id, inst_id=str(entry["inst_id"]), stop_type="1")

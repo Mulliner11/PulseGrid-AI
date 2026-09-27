@@ -21,6 +21,8 @@ from telegram.ext import (
 )
 
 from bot.menu import (
+    MISSING_BUILDER_CODE_TEXT,
+    builder_code_missing,
     cmd_grids,
     cmd_help,
     cmd_menu,
@@ -328,6 +330,13 @@ async def on_launch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 current["submitting"] = False
         return
     proposal = entry["proposal"]
+    if builder_code_missing(runtime.settings):
+        async with runtime.lock:
+            current = runtime.plans.get(plan_id)
+            if current is not None:
+                current["submitting"] = False
+        await message.reply_text(MISSING_BUILDER_CODE_TEXT, reply_markup=main_menu_keyboard())
+        return
     try:
         result = await execute_confirmed_grid(proposal, okx=runtime.okx, algo=runtime.algo)
     except (BrakeActiveError, StrategyRejected) as exc:
