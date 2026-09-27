@@ -21,7 +21,26 @@ if str(ROOT) not in sys.path:
 import httpx
 from pydantic import ValidationError
 
-from bot.handlers import StrategyRejected, compose_grid_proposal, execute_confirmed_grid, on_launch
+from telegram.ext import Application, CommandHandler
+
+from bot.handlers import (
+    StrategyRejected,
+    compose_grid_proposal,
+    execute_confirmed_grid,
+    on_launch,
+    on_text,
+    register_handlers,
+)
+from bot.menu import (
+    MENU_GRIDS,
+    MENU_HELP,
+    MENU_LABELS,
+    MENU_NEW,
+    MENU_STATUS,
+    MENU_STOP,
+    is_menu_text,
+    main_menu_keyboard,
+)
 from bot.ui_cards import LAUNCH_BUTTON_TEXT, render_confirm_card
 from config.settings import Settings
 from core.llm.groq_client import (
@@ -448,10 +467,25 @@ class SettingsTests(unittest.TestCase):
         )
         missing = set(empty.missing_runtime_keys())
         self.assertIn("GROQ_API_KEY", missing)
-        self.assertIn("OKX_AI_BUILDER_CODE", missing)
+        self.assertNotIn("OKX_AI_BUILDER_CODE", missing)
         self.assertTrue(empty.is_demo)
         with self.assertRaises(ValidationError):
             Settings(OKX_FLAG="2", _env_file=None)
+
+    def test_boot_allows_empty_builder_code(self) -> None:
+        settings = Settings(
+            GROQ_API_KEY="g",
+            TELEGRAM_BOT_TOKEN="t",
+            OKX_API_KEY="k",
+            OKX_SECRET_KEY="s",
+            OKX_PASSPHRASE="p",
+            OKX_FLAG="1",
+            OKX_AI_BUILDER_CODE="",
+            _env_file=None,
+        )
+        self.assertEqual(settings.missing_runtime_keys(), [])
+        self.assertEqual(settings.okx_ai_builder_code, "")
+        self.assertTrue(settings.is_demo)
 
 
 class OkxAttributionTests(unittest.IsolatedAsyncioTestCase):
@@ -536,6 +570,10 @@ class OkxAttributionTests(unittest.IsolatedAsyncioTestCase):
         before = len(seen)
         with self.assertRaises(OkxClientError):
             await blocked.place_order(inst_id="SOL-USDT", side="buy", ord_type="market", sz="1")
+        self.assertEqual(len(seen), before)
+        with self.assertRaises(OkxClientError) as stopped:
+            await OkxStrategyAlgo(blocked).stop_spot_grid(algo_id="1", inst_id="SOL-USDT")
+        self.assertIn("OKX_AI_BUILDER_CODE", str(stopped.exception))
         self.assertEqual(len(seen), before)
         with self.assertRaises(OkxClientError):
             await blocked._request("POST", "/api/v5/trade/order", body={"instId": "SOL-USDT"}, trade=False)
@@ -646,6 +684,395 @@ class ConfirmFlowTests(unittest.IsolatedAsyncioTestCase):
         proposal = {"intent": {"direction": "short", "symbol": "SOL-USDT"}, "bounds": {}, "bar": "15m"}
         with self.assertRaises(StrategyRejected):
             await execute_confirmed_grid(proposal, okx=Boom(), algo=None)  # type: ignore[arg-type]
+
+
+class _BotMessage:
+    def __init__(self, text: str = "", chat_id: int = 7) -> None:
+        self.text = text
+        self.chat_id = chat_id
+        self.chat = self
+        self.replies: list[tuple[str, dict]] = []
+
+    async def send_action(self, action: object) -> None:
+        return None
+
+    async def reply_text(self, text: str, **kwargs: object) -> "_BotMessage":
+        self.replies.append((text, kwargs))
+        return self
+
+
+class _StopQuery:
+    def __init__(self, data: str, user_id: int, message: _BotMessage) -> None:
+        self.data = data
+        self.from_user = SimpleNamespace(id=user_id)
+        self.message = message
+        self.answers: list[tuple[str | None, bool]] = []
+
+    async def answer(self, text: str | None = None, show_alert: bool = False) -> None:
+        self.answers.append((text, show_alert))
+
+    async def edit_message_reply_markup(self, reply_markup: object = None) -> None:
+        return None
+
+
+class _PendingAlgo:
+    def __init__(self, rows: list[dict], *, stop_error: Exception | None = None) -> None:
+        self.rows = rows
+        self.stop_error = stop_error
+        self.stops: list[dict[str, str]] = []
+        self.listed: list[str] = []
+
+    async def list_pending(self, algo_ord_type: str = "grid") -> dict:
+        self.listed.append(algo_ord_type)
+        return {"code": "0", "data": self.rows}
+
+    async def stop_spot_grid(self, *, algo_id: str, inst_id: str, stop_type: str = "1") -> dict:
+        if self.stop_error is not None:
+            raise self.stop_error
+        self.stops.append({"algo_id": algo_id, "inst_id": inst_id, "stop_type": stop_type})
+        return {"data": [{"algoId": algo_id, "sCode": "0"}]}
+
+
+class _IntentProbe:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def parse_user_intent(self, text: str) -> dict:
+        self.calls.append(text)
+        raise IntentParseError("测试到此为止")
+
+
+def _menu_context(algo: object, agent: object | None = None) -> tuple[SimpleNamespace, SimpleNamespace]:
+    runtime = SimpleNamespace(
+        settings=SimpleNamespace(
+            is_demo=True,
+            groq_model="openai/gpt-oss-120b",
+            default_kline_bar="15m",
+            okx_ai_builder_code="BUILDER1",
+        ),
+        agent=agent,
+        okx=None,
+        algo=algo,
+        plans={},
+        watches={"SOL-USDT": {"chat_ids": {7}, "brake": None}},
+        stop_drafts={},
+        lock=asyncio.Lock(),
+    )
+    context = SimpleNamespace(application=SimpleNamespace(bot_data={"runtime": runtime}))
+    return runtime, context
+
+
+def _sample_pending() -> list[dict]:
+    return [
+        {
+            "algoId": "998877",
+            "instId": "SOL-USDT",
+            "instType": "SPOT",
+            "algoOrdType": "grid",
+            "state": "running",
+            "maxPx": "180",
+            "minPx": "120",
+            "gridNum": "20",
+        },
+        {
+            "algoId": "555",
+            "instId": "ETH-USDT",
+            "instType": "SPOT",
+            "algoOrdType": "grid",
+            "state": "stopping",
+            "maxPx": "4000",
+            "minPx": "3000",
+            "gridNum": "10",
+        },
+        {
+            "algoId": "777",
+            "instId": "BTC-USDT-SWAP",
+            "instType": "SWAP",
+            "algoOrdType": "grid",
+            "state": "running",
+            "maxPx": "90000",
+            "minPx": "80000",
+        },
+        {
+            "algoId": "666",
+            "instId": "ETH-USDT",
+            "instType": "SPOT",
+            "algoOrdType": "contract_grid",
+            "state": "running",
+            "maxPx": "9",
+            "minPx": "1",
+        },
+    ]
+
+
+class MenuShellTests(unittest.TestCase):
+    def test_main_menu_keyboard_labels(self) -> None:
+        markup = main_menu_keyboard()
+        labels = [button.text for row in markup.keyboard for button in row]
+        self.assertEqual(labels, list(MENU_LABELS))
+        self.assertIn(MENU_NEW, labels)
+        self.assertIn(MENU_GRIDS, labels)
+        self.assertIn(MENU_STOP, labels)
+        self.assertIn(MENU_STATUS, labels)
+        self.assertIn(MENU_HELP, labels)
+        self.assertTrue(markup.is_persistent)
+        self.assertTrue(markup.resize_keyboard)
+        for label in MENU_LABELS:
+            self.assertTrue(is_menu_text(f"  {label}  "))
+        self.assertFalse(is_menu_text("我有 2000 U，打算持有 SOL，希望年化稳一点"))
+
+    def test_slash_aliases_are_registered(self) -> None:
+        application = Application.builder().token("123456:TEST").build()
+        register_handlers(application)
+        commands: set[str] = set()
+        patterns: list[str] = []
+        for group in application.handlers.values():
+            for handler in group:
+                if isinstance(handler, CommandHandler):
+                    commands.update(handler.commands)
+                pattern = getattr(handler, "pattern", None)
+                if pattern is not None:
+                    patterns.append(pattern.pattern if hasattr(pattern, "pattern") else str(pattern))
+        self.assertIn("menu", commands)
+        self.assertIn("grids", commands)
+        self.assertIn("positions", commands)
+        self.assertIn("stop", commands)
+        self.assertIn("status", commands)
+        self.assertIn("help", commands)
+        self.assertTrue(any(item.startswith("^pg:[0-9a-f]{8}$") or item == "^pg:[0-9a-f]{8}$" for item in patterns))
+        self.assertTrue(any("pgstop" in item for item in patterns))
+
+
+class MenuRoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_menu_text_is_not_sent_to_groq(self) -> None:
+        agent = _IntentProbe()
+        _runtime, context = _menu_context(_PendingAlgo([]), agent)
+        replies: dict[str, str] = {}
+        for label in MENU_LABELS:
+            message = _BotMessage(label)
+            update = SimpleNamespace(effective_message=message, effective_user=SimpleNamespace(id=111))
+            await on_text(update, context)  # type: ignore[arg-type]
+            self.assertTrue(message.replies, label)
+            replies[label] = message.replies[0][0]
+            keyboard = message.replies[0][1].get("reply_markup")
+            self.assertIsNotNone(keyboard, label)
+            pressed = [button.text for row in keyboard.keyboard for button in row]
+            self.assertEqual(pressed, list(MENU_LABELS))
+        self.assertEqual(agent.calls, [])
+        self.assertIn("2000 U", replies[MENU_NEW])
+        self.assertIn("当前没有未停止的现货网格", replies[MENU_GRIDS])
+        self.assertIn("当前没有未停止的现货网格", replies[MENU_STOP])
+        self.assertIn("监控中的交易对：1", replies[MENU_STATUS])
+        self.assertIn("铁律", replies[MENU_HELP])
+        self.assertIn("确认卡", replies[MENU_HELP])
+        self.assertIn("AI Builder Code：BU…R1", replies[MENU_STATUS])
+        self.assertIn("确认下单和停止网格会把该码写入 OKX 的 tag。", replies[MENU_HELP])
+
+        prose = _BotMessage("我有 2000 U，打算持有 SOL")
+        await on_text(
+            SimpleNamespace(effective_message=prose, effective_user=SimpleNamespace(id=111)),
+            context,  # type: ignore[arg-type]
+        )
+        self.assertEqual(agent.calls, ["我有 2000 U，打算持有 SOL"])
+        self.assertIn("没能理解这条需求", prose.replies[0][0])
+
+
+class GridListStopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_list_pending_shows_spot_bounds_and_skips_other_products(self) -> None:
+        algo = _PendingAlgo(_sample_pending())
+        _runtime, context = _menu_context(algo)
+        message = _BotMessage()
+        update = SimpleNamespace(effective_message=message, effective_user=SimpleNamespace(id=111))
+        from bot.menu import cmd_grids
+
+        await cmd_grids(update, context)  # type: ignore[arg-type]
+        self.assertEqual(algo.listed, ["grid"])
+        text = message.replies[0][0]
+        self.assertIn("SOL-USDT", text)
+        self.assertIn("998877", text)
+        self.assertIn("120", text)
+        self.assertIn("180", text)
+        self.assertIn("运行中", text)
+        self.assertIn("ETH-USDT", text)
+        self.assertIn("停止中", text)
+        self.assertNotIn("BTC-USDT-SWAP", text)
+        self.assertNotIn("90000", text)
+        self.assertNotIn("666", text)
+
+    async def test_stop_requires_owner_and_second_confirm(self) -> None:
+        from bot.menu import cmd_stop, on_stop_callback
+
+        algo = _PendingAlgo(_sample_pending())
+        runtime, context = _menu_context(algo)
+        message = _BotMessage()
+        update = SimpleNamespace(effective_message=message, effective_user=SimpleNamespace(id=111))
+        await cmd_stop(update, context)  # type: ignore[arg-type]
+        markup = message.replies[0][1]["reply_markup"]
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+        self.assertEqual(callbacks, ["pgstop:998877"])
+        self.assertNotIn("555", "".join(callbacks))
+
+        stranger = _StopQuery("pgstop:998877", 222, message)
+        await on_stop_callback(SimpleNamespace(callback_query=stranger), context)  # type: ignore[arg-type]
+        self.assertEqual(stranger.answers, [("这不是你的停止确认", True)])
+        self.assertFalse(runtime.stop_drafts["998877"]["armed"])
+
+        early = _StopQuery("pgstopok:998877", 111, message)
+        await on_stop_callback(SimpleNamespace(callback_query=early), context)  # type: ignore[arg-type]
+        self.assertEqual(early.answers, [("请先点选要停止的网格", True)])
+        self.assertEqual(algo.stops, [])
+
+        owner = _StopQuery("pgstop:998877", 111, message)
+        await on_stop_callback(SimpleNamespace(callback_query=owner), context)  # type: ignore[arg-type]
+        self.assertTrue(runtime.stop_drafts["998877"]["armed"])
+        confirm = message.replies[-1][0]
+        self.assertIn("确认停止", confirm)
+        self.assertIn("SOL-USDT", confirm)
+        self.assertIn("998877", confirm)
+        confirm_buttons = [
+            button.callback_data
+            for row in message.replies[-1][1]["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("pgstopok:998877", confirm_buttons)
+
+        other_ok = _StopQuery("pgstopok:998877", 222, message)
+        await on_stop_callback(SimpleNamespace(callback_query=other_ok), context)  # type: ignore[arg-type]
+        self.assertEqual(other_ok.answers, [("这不是你的停止确认", True)])
+        self.assertEqual(algo.stops, [])
+
+        confirmed = _StopQuery("pgstopok:998877", 111, message)
+        await on_stop_callback(SimpleNamespace(callback_query=confirmed), context)  # type: ignore[arg-type]
+        self.assertEqual(
+            algo.stops,
+            [{"algo_id": "998877", "inst_id": "SOL-USDT", "stop_type": "1"}],
+        )
+        self.assertNotIn("998877", runtime.stop_drafts)
+        self.assertIn("停止请求已提交", message.replies[-1][0])
+        self.assertIn("AI Builder Code", message.replies[-1][0])
+
+    async def test_missing_builder_code_is_explained_in_chinese(self) -> None:
+        from bot.menu import cmd_stop, on_stop_callback
+
+        algo = _PendingAlgo(
+            _sample_pending(),
+            stop_error=OkxClientError(
+                "拒绝发送交易请求：未配置 OKX_AI_BUILDER_CODE。"
+                "OKX 成交归因需要把 aiBuilderCode 写入请求字段 tag。"
+            ),
+        )
+        runtime, context = _menu_context(algo)
+        message = _BotMessage()
+        await cmd_stop(
+            SimpleNamespace(effective_message=message, effective_user=SimpleNamespace(id=111)),
+            context,  # type: ignore[arg-type]
+        )
+        await on_stop_callback(
+            SimpleNamespace(callback_query=_StopQuery("pgstop:998877", 111, message)),
+            context,  # type: ignore[arg-type]
+        )
+        await on_stop_callback(
+            SimpleNamespace(callback_query=_StopQuery("pgstopok:998877", 111, message)),
+            context,  # type: ignore[arg-type]
+        )
+        self.assertEqual(algo.stops, [])
+        text = message.replies[-1][0]
+        self.assertIn("OKX_AI_BUILDER_CODE", text)
+        self.assertIn("未配置", text)
+        self.assertIn("确认下单", text)
+        self.assertIn("停止网格", text)
+        self.assertFalse(runtime.stop_drafts["998877"]["submitting"])
+        self.assertTrue(runtime.stop_drafts["998877"]["armed"])
+
+    async def test_status_and_help_show_missing_builder_code(self) -> None:
+        from bot.menu import cmd_help, cmd_status
+
+        _runtime, context = _menu_context(_PendingAlgo([]))
+        _runtime.settings.okx_ai_builder_code = ""
+        status = _BotMessage()
+        await cmd_status(
+            SimpleNamespace(effective_message=status, effective_user=SimpleNamespace(id=111)),
+            context,  # type: ignore[arg-type]
+        )
+        status_text = status.replies[0][0]
+        self.assertIn("AI Builder Code：未配置", status_text)
+        self.assertIn("确认下单和停止网格会失败", status_text)
+        self.assertIn("监控中的交易对：1", status_text)
+
+        help_message = _BotMessage()
+        await cmd_help(
+            SimpleNamespace(effective_message=help_message, effective_user=SimpleNamespace(id=111)),
+            context,  # type: ignore[arg-type]
+        )
+        help_text = help_message.replies[0][0]
+        self.assertIn("AI Builder Code：未配置", help_text)
+        self.assertIn("确认下单和停止网格会失败", help_text)
+        self.assertIn("铁律", help_text)
+
+    async def test_launch_and_stop_without_builder_code_reply_in_chinese(self) -> None:
+        from bot.menu import cmd_stop, on_stop_callback
+
+        class Boom:
+            async def fetch_market_bundle(self, *args, **kwargs):
+                raise AssertionError("未配置 Builder Code 时不应拉行情或下单")
+
+            async def stop_spot_grid(self, **kwargs):
+                raise AssertionError("未配置 Builder Code 时不应调用停止接口")
+
+            async def list_pending(self, algo_ord_type: str = "grid") -> dict:
+                return {"code": "0", "data": _sample_pending()}
+
+        runtime = SimpleNamespace(
+            plans={
+                "abcd1234": {
+                    "proposal": {
+                        "intent": {"direction": "neutral", "symbol": "SOL-USDT"},
+                        "bounds": {},
+                        "bar": "15m",
+                    },
+                    "chat_id": 7,
+                    "user_id": 111,
+                    "submitting": False,
+                    "ts": time.time(),
+                }
+            },
+            watches={},
+            stop_drafts={},
+            lock=asyncio.Lock(),
+            okx=Boom(),
+            algo=Boom(),
+            settings=SimpleNamespace(is_demo=True, okx_ai_builder_code="", groq_model="m", default_kline_bar="15m"),
+        )
+        context = SimpleNamespace(application=SimpleNamespace(bot_data={"runtime": runtime}))
+        launch_message = _BotMessage()
+        launch_query = _StopQuery("pg:abcd1234", 111, launch_message)
+        await on_launch(SimpleNamespace(callback_query=launch_query), context)  # type: ignore[arg-type]
+        launch_text = launch_message.replies[-1][0]
+        self.assertIn("未配置", launch_text)
+        self.assertIn("确认下单", launch_text)
+        self.assertIn("停止网格", launch_text)
+        self.assertNotIn("Traceback", launch_text)
+        self.assertFalse(runtime.plans["abcd1234"]["submitting"])
+
+        stop_message = _BotMessage()
+        await cmd_stop(
+            SimpleNamespace(effective_message=stop_message, effective_user=SimpleNamespace(id=111)),
+            context,  # type: ignore[arg-type]
+        )
+        await on_stop_callback(
+            SimpleNamespace(callback_query=_StopQuery("pgstop:998877", 111, stop_message)),
+            context,  # type: ignore[arg-type]
+        )
+        await on_stop_callback(
+            SimpleNamespace(callback_query=_StopQuery("pgstopok:998877", 111, stop_message)),
+            context,  # type: ignore[arg-type]
+        )
+        stop_text = stop_message.replies[-1][0]
+        self.assertIn("未配置", stop_text)
+        self.assertIn("确认下单", stop_text)
+        self.assertIn("停止网格", stop_text)
+        self.assertNotIn("Traceback", stop_text)
+        self.assertFalse(runtime.stop_drafts["998877"]["submitting"])
 
 
 class ArchitectureTests(unittest.TestCase):

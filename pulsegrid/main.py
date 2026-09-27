@@ -139,6 +139,10 @@ def main() -> None:
         )
     if not settings.is_demo:
         logger.warning("OKX_FLAG=0，当前连接实盘，确认后的网格会使用真实资金")
+    if not settings.okx_ai_builder_code:
+        logger.warning(
+            "未配置 OKX_AI_BUILDER_CODE。机器人可以启动，但确认下单和停止网格会被拒绝"
+        )
     runtime = build_runtime(settings)
     application = build_application(runtime)
     logger.info("脉冲智网启动，模型=%s，OKX flag=%s", settings.groq_model, settings.okx_flag)

@@ -20,6 +20,19 @@ from telegram.ext import (
     filters,
 )
 
+from bot.menu import (
+    MISSING_BUILDER_CODE_TEXT,
+    builder_code_missing,
+    cmd_grids,
+    cmd_help,
+    cmd_menu,
+    cmd_status,
+    cmd_stop,
+    format_okx_trade_error,
+    main_menu_keyboard,
+    on_stop_callback,
+    route_menu_text,
+)
 from bot.ui_cards import render_confirm_card
 from config.settings import Settings
 from core.llm.groq_client import GroqAgent, GroqAgentError, IntentParseError
@@ -65,6 +78,8 @@ class Runtime:
         self.algo = algo
         self.plans: dict[str, dict[str, Any]] = {}
         self.watches: dict[str, dict[str, Any]] = {}
+        # algoId -> 打开「停止网格」的用户。确认回调要核对这份归属。
+        self.stop_drafts: dict[str, dict[str, Any]] = {}
         # 保护确认单和监控名单。网络请求不要放在这把锁里。
         self.lock = asyncio.Lock()
 
@@ -217,39 +232,20 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     mode = "模拟盘" if runtime.settings.is_demo else "实盘"
     await message.reply_text(
         "脉冲智网 PulseGrid AI\n\n"
-        "直接发你的资金和持有计划，例如：\n"
+        "用下方菜单操作，或直接发你的资金和持有计划，例如：\n"
         "我有 2000 U，打算持有 SOL，希望年化稳一点、能抗 15% 的暴跌。\n\n"
         "我会先理解这句话，再用 OKX 行情计算自适应网格和急刹车，然后给你一张确认卡。"
-        "价格和下单参数只由本地量化引擎计算。\n\n"
-        f"当前环境：{mode}。点确认后才会向 OKX 提交网格。"
-    )
-
-
-async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
-    if message is None:
-        return
-    runtime = _runtime(context)
-    settings = runtime.settings
-    async with runtime.lock:
-        watch_count = len(runtime.watches)
-        plan_count = len(runtime.plans)
-    code = settings.okx_ai_builder_code
-    masked = (code[:2] + "…" + code[-2:]) if len(code) > 4 else ("已配置" if code else "未配置")
-    await message.reply_text(
-        f"环境：{'模拟盘' if settings.is_demo else '实盘'}\n"
-        f"模型：{settings.groq_model}\n"
-        f"K 线周期：{settings.default_kline_bar}\n"
-        f"监控中的交易对：{watch_count}\n"
-        f"待确认策略：{plan_count}\n"
-        f"AI Builder Code：{masked}\n"
-        "订单簿监控与下单在同一个事件循环里并发执行。"
+        "价格和下单参数只由本地量化引擎计算。菜单上的按钮不会送给模型。\n\n"
+        f"当前环境：{mode}。点确认后才会向 OKX 提交网格。",
+        reply_markup=main_menu_keyboard(),
     )
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None or not message.text:
+        return
+    if await route_menu_text(message.text, update, context):
         return
     runtime = _runtime(context)
     await message.chat.send_action(ChatAction.TYPING)
@@ -334,6 +330,13 @@ async def on_launch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 current["submitting"] = False
         return
     proposal = entry["proposal"]
+    if builder_code_missing(runtime.settings):
+        async with runtime.lock:
+            current = runtime.plans.get(plan_id)
+            if current is not None:
+                current["submitting"] = False
+        await message.reply_text(MISSING_BUILDER_CODE_TEXT, reply_markup=main_menu_keyboard())
+        return
     try:
         result = await execute_confirmed_grid(proposal, okx=runtime.okx, algo=runtime.algo)
     except (BrakeActiveError, StrategyRejected) as exc:
@@ -349,7 +352,7 @@ async def on_launch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if current is not None:
                 current["submitting"] = False
         logger.warning("OKX 下单失败: %s", exc)
-        await message.reply_text(f"OKX 下单失败：{exc}")
+        await message.reply_text(format_okx_trade_error(exc, action="下单"), reply_markup=main_menu_keyboard())
         return
 
     async with runtime.lock:
@@ -369,7 +372,8 @@ async def on_launch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"区间：{bounds['lower_str']} – {bounds['upper_str']}\n"
         f"格数：{bounds['grid_count']}\n"
         f"投入：{bounds['quote_sz']} USDT\n"
-        "AI Builder Code 已写入 OKX tag。"
+        "AI Builder Code 已写入 OKX tag。",
+        reply_markup=main_menu_keyboard(),
     )
 
 
@@ -384,8 +388,14 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("start", cmd_start))
-    application.add_handler(CommandHandler("help", cmd_start))
+    application.add_handler(CommandHandler("menu", cmd_menu))
+    application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("status", cmd_status))
+    application.add_handler(CommandHandler(["grids", "positions"], cmd_grids))
+    application.add_handler(CommandHandler("stop", cmd_stop))
     application.add_handler(CallbackQueryHandler(on_launch, pattern=r"^pg:[0-9a-f]{8}$"))
+    application.add_handler(
+        CallbackQueryHandler(on_stop_callback, pattern=r"^pgstop(?:ok|no)?:[A-Za-z0-9]{1,40}$")
+    )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     application.add_error_handler(on_error)

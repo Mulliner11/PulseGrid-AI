@@ -59,7 +59,8 @@ class Settings(BaseSettings):
         default="1",
         validation_alias=AliasChoices("OKX_FLAG", "okx_flag"),
     )
-    # AI Builder Code。交易请求会把它写入 OKX 的 tag 字段，用于成交量归因和手续费返佣。
+    # AI Builder Code。启动时可以留空（申请审核期间机器人仍可运行）。
+    # 交易请求会把它写入 OKX 的 tag；留空时下单和停止网格在客户端被拒绝。
     okx_ai_builder_code: str = Field(
         default="",
         validation_alias=AliasChoices("OKX_AI_BUILDER_CODE", "okx_ai_builder_code"),
@@ -122,14 +123,17 @@ class Settings(BaseSettings):
         return self.okx_flag == "1"
 
     def missing_runtime_keys(self) -> list[str]:
-        """启动前检查。返回未填写的环境变量名。"""
+        """启动前检查。返回未填写的环境变量名。
+
+        OKX_AI_BUILDER_CODE 不在这里。审核未通过时也可以启动；
+        确认下单和停止网格仍由 OKX 客户端拒绝空码。
+        """
         required = {
             "GROQ_API_KEY": self.groq_api_key,
             "TELEGRAM_BOT_TOKEN": self.telegram_bot_token,
             "OKX_API_KEY": self.okx_api_key,
             "OKX_SECRET_KEY": self.okx_secret_key,
             "OKX_PASSPHRASE": self.okx_passphrase,
-            "OKX_AI_BUILDER_CODE": self.okx_ai_builder_code,
         }
         return [name for name, value in required.items() if not str(value).strip()]
 
