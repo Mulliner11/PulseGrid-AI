@@ -2,181 +2,181 @@
   <img src="assets/pulsegrid-logo-icon.png" alt="PulseGrid AI" width="128" />
 </p>
 
-# PulseGrid AI（脉冲智网）
+# PulseGrid AI (pulse-grid trading engine)
 
-OKX 上的自适应防破网网格交易引擎。Telegram 是操作界面，Python 负责行情、网格和执行，Groq 只负责听懂人话和写中文说明。
+An adaptive anti-break grid trading engine for OKX. Telegram is the control surface. Python owns market data, the grid, and execution. Groq only parses natural language and writes the Chinese explanation on the confirmation card. The bot never asks the model for a price.
 
-PulseGrid AI is an adaptive anti-break grid engine for OKX. The bot never asks the model for a price.
+## What it does
 
-## 它做什么
+Describe your capital and hold plan in one sentence, for example:
 
-你用一句话描述资金和持有计划，例如：
+> I have 2000 USDT. I plan to hold SOL, prefer a conservative profile, and want the grid to withstand about a 15% drawdown.
 
-> 我有 2000 U，打算持有 SOL，希望年化稳一点、能抗 15% 的暴跌。
+The bot will:
 
-机器人会：
+1. Use Groq to turn that sentence into a structured intent (pair, budget, risk preference, direction, drawdown constraint).
+2. Use OKX market data to compute ATR, VWAP, support and resistance, order-book imbalance, and an OI + CVD emergency brake locally.
+3. Produce the adaptive spot grid's upper and lower bounds, grid count, per-grid profit, and stop-loss.
+4. Send an HTML confirmation card. An order is placed only after you tap the one-tap launch button on that card.
+5. Use the same menu to list spot grids that have not been stopped, or stop one after a second confirmation.
 
-1. 用 Groq 把这句话收成结构化意图（交易对、预算、风险偏好、方向、回撤约束）。
-2. 用 OKX 行情在本地计算 ATR、VWAP、支撑压力、订单簿失衡，以及 OI + CVD 急刹车。
-3. 生成自适应现货网格的上下沿、格数、单格收益和止损。
-4. 发一张 HTML 确认卡。你点「⚡ 一键在 OKX 开启网格」之后才下单。
-5. 用同一套菜单查看未停止的现货网格，或二次确认后停止。
+Phase-1 one-tap launch submits a **spot grid** only. A short recorded in the intent does not open a short automatically.
 
-Phase-1 的一键开启只提交**现货网格**。意图里的做空不会自动开仓。
-
-## 架构和铁律
+## Architecture and iron rules
 
 ```text
-Telegram 菜单 / 自然语言
+Telegram menu / natural language
         │
         ▼
-Groq ── 只输出意图 JSON，以及确认卡上的中文说明
+Groq ── emits intent JSON only, plus the Chinese explanation on the confirmation card
         │
         ▼
-Python 量化层 ── K 线、ATR、VWAP、CVD、OI、网格上下界、格数、止损
+Python quant layer ── candles, ATR, VWAP, CVD, OI, grid bounds, grid count, stop-loss
         │
         ▼
-OKX REST ── 行情只读；交易请求强制写入 tag = AI Builder Code
+OKX REST ── market data is read-only; trading requests must write tag = AI Builder Code
 ```
 
-铁律：
+Iron rules:
 
-- **LLM 不算价格。** Groq 不计算现价、上下沿、格数、每格收益率或下单数量，也不许在说明里编造确认卡上没有的数字。
-- **Python 拥有行情和下单参数。** 自适应网格、急刹车、再查一次哨兵，都在 `pulsegrid/core` 里完成。
-- **先确认再下单。** 确认卡大约 15 分钟有效，而且只有生成它的用户能点。急刹车或 OI/CVD 不齐时，没有下单按钮。
-- **每条交易路径都带 Builder Code。** 下单、改网格、停止网格都会把 `OKX_AI_BUILDER_CODE` 写入 OKX 字段 `tag`。没配置就拒绝发送，不会发出空 tag。
-- **默认模拟盘。** `OKX_FLAG` 默认为 `1`。
+- **The LLM does not price.** Groq does not compute last price, upper or lower bounds, grid count, per-grid yield, or order size, and it must not invent numbers that are absent from the confirmation card.
+- **Python owns market data and order parameters.** The adaptive grid, the emergency brake, and the second sentinel check all run in `pulsegrid/core`.
+- **Confirm before any order.** A confirmation card stays valid for about 15 minutes, and only the user who generated it can tap it. There is no order button when the emergency brake is on or when OI/CVD data is incomplete.
+- **Every trading path carries the Builder Code.** Place, amend-grid, and stop-grid requests write `OKX_AI_BUILDER_CODE` into the OKX field `tag`. If it is unset, the client refuses to send the request and never sends an empty tag.
+- **Demo trading by default.** `OKX_FLAG` defaults to `1`.
 
-默认模型是 `openai/gpt-oss-120b`。`llama-3.3-70b-versatile` 在当前用法下会 404，不要把它当默认模型。换模型也仍然只做意图和说明。
+The default model is `openai/gpt-oss-120b`. `llama-3.3-70b-versatile` returns 404 under the current usage, so do not use it as the default. Switching models still limits the model to intent and the written explanation.
 
-## Telegram 怎么用
+## How to use Telegram
 
-1. 在 Telegram 找 [@BotFather](https://t.me/BotFather)，发送 `/newbot`，拿到令牌。
-2. 在 OKX 创建 API 密钥。先用**模拟盘**密钥。交易权限按你要跑的网格来开，不要把密钥提交到仓库。
-3. 在 [OKX AI Builder](https://www.okx.com/zh-hans/agent-tradekit/builder) 申请 AI Builder Code，并登记本仓库地址（见下一节）。
-4. 安装并启动：
+1. In Telegram, open [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the token.
+2. Create an OKX API key. Start with a **demo trading** key. Enable trade permissions for the grid you intend to run. Do not commit the key to the repository.
+3. Apply for an AI Builder Code on [OKX AI Builder](https://www.okx.com/en-us/agent-tradekit/builder) and register this repository URL (see the next section).
+4. Install and start:
 
 ```bash
 cd pulsegrid
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # 填写下面的变量，不要提交 .env
-python main.py --check # 本地单测，不访问外网
+cp .env.example .env   # fill in the variables below; do not commit .env
+python main.py --check # local unit tests; no network
 python main.py
 ```
 
-5. 在 Telegram 打开你的机器人，发送 `/start`。底部会出现常驻主菜单。
+5. Open your bot in Telegram and send `/start`. A persistent main menu appears at the bottom.
 
-| 按钮 | 命令 | 作用 |
+Button labels below are the literal strings the bot shows. The rest of this guide is English.
+
+| Button | Command | What it does |
 | --- | --- | --- |
-| 📝 新建策略 | 直接发一句话即可 | 提示你输入自然语言。按钮本身不会送给 Groq |
-| 📊 我的网格 | `/grids` 或 `/positions` | 列出 OKX 上未停止的现货网格：交易对、algoId、上下界、状态 |
-| 🛑 停止网格 | `/stop` | 点选一个网格，再点「确认停止」才会调用停止 |
-| 📡 状态 | `/status` | 模拟盘/实盘、模型、K 线周期、监控中的交易对数量 |
-| ❓ 帮助 | `/help` | 示例说法、铁律、确认卡各字段是什么意思 |
-| 主菜单 | `/menu` | 重新展开菜单说明和键盘 |
+| 📝 新建策略 | Send a sentence directly | Asks you to type a natural-language request. The button itself is not sent to Groq |
+| 📊 我的网格 | `/grids` or `/positions` | Lists spot grids on OKX that have not been stopped: pair, algoId, bounds, and state |
+| 🛑 停止网格 | `/stop` | Pick a grid, then confirm a second time before stop is called |
+| 📡 状态 | `/status` | Demo or live, model, candle interval, and how many pairs are being watched |
+| ❓ 帮助 | `/help` | Example phrasing, the iron rules, and what each confirmation-card field means |
+| Main menu | `/menu` | Shows the menu text and keyboard again |
 
-示例说法可以直接发给机器人（不必先点菜单）：
+You can send an example sentence straight to the bot. You do not have to tap the menu first:
 
 ```text
-我有 2000 U，打算持有 SOL，希望年化稳一点、能抗 15% 的暴跌。
+I have 2000 USDT. I plan to hold SOL, prefer a conservative profile, and want the grid to withstand about a 15% drawdown.
 ```
 
-确认卡上的现价、上沿、下沿、格数、止损来自本地量化引擎。说明段落才是模型写的。点一键开启后，机器人会再拉一次 OI/CVD；急刹车或数据不足就拒绝下单。停止网格同样要二次确认，并且只有打开这次停止列表的用户能点确认。停止时会卖出网格里的基础货币。
+Last price, upper bound, lower bound, grid count, and stop-loss on the confirmation card come from the local quant engine. Only the explanation paragraph is written by the model, and that paragraph is Chinese. After you tap one-tap launch, the bot fetches OI/CVD once more. An emergency brake or insufficient data refuses the order. Stopping a grid also requires a second confirmation, and only the user who opened that stop list can confirm. Stopping sells the base currency held in the grid.
 
-菜单上的五个中文按钮是导航，不会被当成策略原文送给模型。
+The five Chinese buttons on the menu are navigation. They are not passed to the model as strategy text.
 
-## 环境变量
+## Environment variables
 
-变量定义在 `pulsegrid/.env.example`。进程从 `pulsegrid/.env` 或真实环境变量读取，仓库里不要放密钥。
+The variables are defined in `pulsegrid/.env.example`. The process reads `pulsegrid/.env` or the real environment. Do not put secrets in the repository.
 
-| 变量 | 作用 |
+| Variable | Role |
 | --- | --- |
-| `GROQ_API_KEY` | Groq 密钥。只用于意图和中文说明 |
-| `GROQ_MODEL` | 默认 `openai/gpt-oss-120b` |
-| `TELEGRAM_BOT_TOKEN` | BotFather 发放的机器人令牌 |
-| `OKX_API_KEY` | OKX API Key |
-| `OKX_SECRET_KEY` | OKX Secret |
-| `OKX_PASSPHRASE` | 创建 API 时设置的口令 |
-| `OKX_FLAG` | `1` 模拟盘（默认），`0` 实盘 |
-| `OKX_AI_BUILDER_CODE` | AI Builder Code。启动可留空；确认下单和停止网格前必须填上，并写入 `tag` |
-| `OKX_BASE_URL` | 默认 `https://www.okx.com` |
-| `DEFAULT_KLINE_BAR` | 默认 K 线周期，`15m` |
-| `MONITOR_INTERVAL_SEC` | 订单簿哨兵轮询间隔，默认 8 秒 |
-| `LOG_LEVEL` | 日志级别，默认 `INFO` |
+| `GROQ_API_KEY` | Groq key. Used only for intent and the written explanation |
+| `GROQ_MODEL` | Default `openai/gpt-oss-120b` |
+| `TELEGRAM_BOT_TOKEN` | Bot token issued by BotFather |
+| `OKX_API_KEY` | OKX API key |
+| `OKX_SECRET_KEY` | OKX secret |
+| `OKX_PASSPHRASE` | Passphrase set when the API key was created |
+| `OKX_FLAG` | `1` demo trading (default), `0` live trading |
+| `OKX_AI_BUILDER_CODE` | AI Builder Code. May be empty at startup. Required before confirm-to-order and stop-grid, and written into `tag` |
+| `OKX_BASE_URL` | Default `https://www.okx.com` |
+| `DEFAULT_KLINE_BAR` | Default candle interval, `15m` |
+| `MONITOR_INTERVAL_SEC` | Order-book sentinel poll interval, default 8 seconds |
+| `LOG_LEVEL` | Log level, default `INFO` |
 
-启动时若 Groq、Telegram 或 OKX 三件套为空，`python main.py` 会退出并指出缺哪一项。`OKX_AI_BUILDER_CODE` 可以先留空：Builder 申请还在审核时机器人仍能启动。`/status` 和 `/help` 会写明「未配置」。确认下单和停止网格在填上码并重启之前会失败，而且不会发出交易请求。
+If the Groq key, the Telegram token, or the OKX key trio is empty at startup, `python main.py` exits and names the missing item. `OKX_AI_BUILDER_CODE` may stay empty so the bot can still start while a Builder application is under review. `/status` and `/help` report that it is not configured. Confirm-to-order and stop-grid fail until the code is set and the bot is restarted, and no trading request is sent.
 
-## AI Builder Code 和 GitHub 地址
+## AI Builder Code and the GitHub URL
 
-OKX AI Builder 计划用项目的公开仓库标明这套代理是谁的实现。申请或登记 Builder 时填写：
+The OKX AI Builder program uses the project's public repository to identify whose implementation this agent is. When you apply or register a Builder, enter:
 
 `https://github.com/Mulliner11/PulseGrid-AI`
 
-这个地址是项目身份，用来让 OKX 把代理和这份代码对应起来。它**不会**被写进订单。
+That URL is the project identity OKX uses to match the agent to this code. It is **not** written onto orders.
 
-成交归因用的是另一份凭证：AI Builder Code。把它放到 `OKX_AI_BUILDER_CODE`。本仓库的 OKX 客户端在每条会改变订单或网格的请求里强制写入字段 `tag`（OpenAPI 不接受名为 `aiBuilderCode` 的字段）。调用方如果自己塞了别的 `tag`，也会被覆盖成这份码。
+Trade attribution uses a separate credential: the AI Builder Code. Put it in `OKX_AI_BUILDER_CODE`. This repository's OKX client forces the field `tag` on every request that changes an order or a grid. OpenAPI does not accept a field named `aiBuilderCode`. If a caller supplies a different `tag`, it is overwritten with this code.
 
-码还没下来时可以先启动。未配置时，确认卡上的一键下单和「停止网格」都会用中文说明失败原因，请求不会发到 OKX。只读的「我的网格」不写 `tag`。拿到码后写入 `OKX_AI_BUILDER_CODE` 并重启。
+You can start before the code arrives. While it is unset, one-tap order on the confirmation card and stop-grid both fail with an explanation, and the request is not sent to OKX. The read-only grid list does not write `tag`. After you receive the code, set `OKX_AI_BUILDER_CODE` and restart.
 
-集成说明：<https://www.okx.com/zh-hans/help/ai-builder-program-integration-guide>
+Integration guide: <https://www.okx.com/en-us/help/ai-builder-program-integration-guide>
 
-## 模拟盘和实盘
+## Demo and live
 
-- `OKX_FLAG=1`（默认）：私有请求带 `x-simulated-trading: 1`，打到模拟盘。请使用模拟盘 API 密钥。
-- `OKX_FLAG=0`：实盘，确认后的网格使用真实资金。启动时会打警告日志。请换实盘 API 密钥，不要拿模拟盘密钥打实盘。
+- `OKX_FLAG=1` (default): private requests send `x-simulated-trading: 1` and hit demo trading. Use a demo-trading API key.
+- `OKX_FLAG=0`: live trading. A confirmed grid uses real funds. Startup logs a warning. Switch to a live API key. Do not send a demo key to the live endpoint.
 
-确认卡和状态里都会写明当前是模拟盘还是实盘。
+The confirmation card and the status view both state whether the current environment is demo or live.
 
-## 项目结构
+## Project layout
 
 ```text
 .
 ├── README.md
-├── assets/                      # 标志
+├── assets/                      # logo
 └── pulsegrid/
-    ├── main.py                  # 启动机器人；--check 跑测试
+    ├── main.py                  # start the bot; --check runs tests
     ├── .env.example
     ├── requirements.txt
     ├── bot/
-    │   ├── handlers.py          # 意图 → 确认卡 → 下单
-    │   ├── menu.py              # 主菜单、我的网格、停止网格
-    │   └── ui_cards.py          # HTML 确认卡
+    │   ├── handlers.py          # intent → confirmation card → order
+    │   ├── menu.py              # main menu, my grids, stop grid
+    │   └── ui_cards.py          # HTML confirmation card
     ├── config/settings.py
     ├── core/
-    │   ├── llm/groq_client.py   # 意图 + 中文说明
-    │   ├── okx/client.py        # REST；交易路径强制 tag
-    │   ├── okx/strategy_algo.py # 现货网格下单 / 停止 / 查询 / 改界
-    │   └── quant/               # ATR、VWAP、CVD、哨兵、网格
+    │   ├── llm/groq_client.py   # intent + written explanation
+    │   ├── okx/client.py        # REST; trading paths force tag
+    │   ├── okx/strategy_algo.py # spot grid place / stop / query / amend bounds
+    │   └── quant/               # ATR, VWAP, CVD, sentinel, grid
     └── tests/test_phase1.py
 ```
 
-量化层不引用 Groq。LLM 层不引用 OKX，也不拼下单参数。
+The quant layer does not import Groq. The LLM layer does not import OKX and does not assemble order parameters.
 
-## 自检
+## Self-check
 
-在 `pulsegrid` 目录：
+From the `pulsegrid` directory:
 
 ```bash
 python main.py --check
 ```
 
-这会跑 `pulsegrid/tests` 里的单元测试：网格数学、急刹车、意图 JSON、确认卡、Builder Code 的 `tag`、菜单路由，以及用假的 OKX 客户端走通「确认后再下单」和「确认后再停止」。测试不访问 Groq 或 OKX。
+This runs the unit tests under `pulsegrid/tests`: grid math, the emergency brake, intent JSON, the confirmation card, the Builder Code `tag`, menu routing, and a fake OKX client walking through order-only-after-confirm and stop-only-after-confirm. The tests do not call Groq or OKX.
 
-## 当前范围
+## Current scope
 
-Phase-1 已经有的：
+Already in Phase-1:
 
-- 自然语言意图、OKX 行情包、自适应网格和 OI/CVD 急刹车
-- 确认卡，以及确认后才提交的现货网格
-- 常驻中文菜单：新建策略、我的网格、停止网格、状态、帮助
-- 每条交易路径写入 AI Builder Code
-- 同一事件循环里的订单簿哨兵通知
+- Natural-language intent, an OKX market-data bundle, an adaptive grid, and an OI/CVD emergency brake
+- A confirmation card, and a spot grid that is submitted only after confirmation
+- A persistent Chinese menu: new strategy, my grids, stop grid, status, and help
+- The AI Builder Code written on every trading path
+- Order-book sentinel notifications on the same event loop
 
-还没有的：
+Not in Phase-1 yet:
 
-- 没有 K 线、收益曲线或其他图表界面。网格信息是文本和确认卡。
-- 一键开启只做现货网格，不做合约网格。
-- 用户说到做空时，意图会记下来，但不会自动开空。
-- `rebalance_grid_bounds` 已在 OKX 封装里，Telegram 还没有改界入口。
-- 机器人使用一份 OKX API，没有按 Telegram 用户拆成多个交易账户。停止确认只保证「谁打开的列表，谁才能点确认」。
+- No candle chart, equity curve, or other chart UI. Grid information is text plus the confirmation card.
+- One-tap launch places a spot grid only. It does not place a contract grid.
+- When the user asks for a short, the intent records it. A short is not opened automatically.
+- `rebalance_grid_bounds` exists on the OKX wrapper. Telegram has no amend-bounds entry yet.
+- The bot uses one OKX API. It does not split trading accounts by Telegram user. Stop confirmation only checks that the user who opened the list is the user who confirms.
